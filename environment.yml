@@ -1,0 +1,24 @@
+name: pvhc
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - networkx
+  - openpyxl
+  - tqdm
+  - pytz
+  - python-dateutil
+  - pygraphviz
+  - pytest
+  - pip
+  - pip:
+    - cvxpy       # bundles the open-source HiGHS (LP) and Clarabel (conic) solvers used by default
+    - ecos
+    - altdss      # OpenDSS bindings (dss-extensions.org)
+    - gurobipy    # optional: only used if a script is explicitly told to (solver=cp.GUROBI);
+                  # installs with a free, size-limited license, no separate setup needed
