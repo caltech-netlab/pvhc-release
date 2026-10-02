@@ -127,7 +127,7 @@ BETA = np.kron(I_3, beta @ beta_inv.T)[:, [0, 4, 8]]   # (9, 3), maps diag(s_k) 
 BETA_H = np.kron((beta @ beta_inv.T).conj(), I_3)[:, [0, 4, 8]]  # (9, 3), maps diag(s_k^H) to vec(s_k^H)
 # Transformation matrix that maps delta load [s(1,2), s(2,3), s(3,1)] to wye load [s(1), s(2), s(3)]
 # This is equal to $\frac{1}{3} (\Gamma^\top \gamma) \circ \Gamma^\top$
-D2Y = 1/(1-alpha)*np.array([[1, 0, -alpha], [-alpha, 1, 0], [0, -alpha, -1]]) 
+D2Y = 1/(1-alpha)*np.array([[1, 0, -alpha], [-alpha, 1, 0], [0, -alpha, 1]])
 # Matrix mapping delta load connected upstream to an open delta transformer to wye load 
 openD_split2Y = np.kron(Gamma.T, U_delta_3x3 @ gamma)[[0, 4, 8]][:, [0, 4, 8]]
 branch_pwr_relation = {
