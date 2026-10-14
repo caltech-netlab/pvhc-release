@@ -699,6 +699,8 @@ class PVHCProblemWithVoltVar(ClarksonProblem):
                 idx = (bus_idx - 1) * 3 + phases[0] - 1
                 M_v[:, i] = np.real(1e-3 * R[:, idx])
                 M_p[:, i] = np.real(C_tilde_S[:, idx])
+                # Nonzero only below a delta winding (C_tilde_S is complex there)
+                M_q[:, i] = np.imag(C_tilde_S[:, idx])
             else:
                 phase_idx = ldf.STD_DELTA_ORDER.index(tuple(sorted(phases)))
                 trans_vec = self._get_transformation_vector(info.get("connected_transformer", {}), phase_idx)
@@ -707,8 +709,9 @@ class PVHCProblemWithVoltVar(ClarksonProblem):
                     1e-3 * R[:, idx0:idx0 + 3] @ np.real(trans_vec) +
                     1e-3 * X[:, idx0:idx0 + 3] @ np.imag(trans_vec)
                 )
-                M_p[:, i] = np.real(C_tilde_S[:, idx0:idx0 + 3] @ np.real(trans_vec))
-                M_q[:, i] = np.real(C_tilde_S[:, idx0:idx0 + 3] @ np.imag(trans_vec))
+                branch_pwr = C_tilde_S[:, idx0:idx0 + 3] @ trans_vec
+                M_p[:, i] = np.real(branch_pwr)
+                M_q[:, i] = np.imag(branch_pwr)
 
         return M_v, M_p, M_q
 
@@ -773,9 +776,10 @@ class PVHCProblemWithVoltVar(ClarksonProblem):
         """
         Impact of a unit REACTIVE power injection at each device bus (i.e. the
         "q_from_q"/"p_from_q" terms of the delta-to-wye transform). For a
-        grounded (wye) connection there is no p/q cross-coupling: injecting Q
-        only affects the network's Q-flow/voltage terms via X. For a
-        delta-connected device, injecting Q also couples into P branch flow.
+        grounded (wye) connection there is no p/q cross-coupling at the bus:
+        injecting Q affects voltages via X only, and P branch flow only below a
+        delta winding, where C_tilde_S is complex. For a delta-connected device,
+        injecting Q also couples into P branch flow.
         This is exactly the "q dispatch" half of
         `PVHCProblemWithBattery._compute_battery_impact_matrices`.
         """
@@ -803,8 +807,10 @@ class PVHCProblemWithVoltVar(ClarksonProblem):
             if phases[1] == 0:
                 idx = (bus_idx - 1) * 3 + phases[0] - 1
                 M_v_q[:, i] = np.real(1e-3 * X[:, idx])
+                # P + jQ = C_tilde_S (j q): the cross term is nonzero only below a delta
+                # winding, where C_tilde_S is complex.
+                M_P_q[:, i] = -np.imag(C_tilde_S[:, idx])
                 M_Q_q[:, i] = np.real(C_tilde_S[:, idx])
-                # M_P_q stays 0: no cross-coupling for a grounded connection.
             else:
                 phase_idx = ldf.STD_DELTA_ORDER.index(tuple(sorted(phases)))
                 trans_vec = self._get_transformation_vector(info.get("connected_transformer", {}), phase_idx)
@@ -817,8 +823,10 @@ class PVHCProblemWithVoltVar(ClarksonProblem):
                 q_from_q = a
 
                 M_v_q[:, i] = 1e-3 * (R[:, idx0:idx0 + 3] @ p_from_q + X[:, idx0:idx0 + 3] @ q_from_q)
-                M_P_q[:, i] = np.real(C_tilde_S[:, idx0:idx0 + 3] @ p_from_q)
-                M_Q_q[:, i] = np.real(C_tilde_S[:, idx0:idx0 + 3] @ q_from_q)
+                # P + jQ = (C_tilde_S trans_vec) (j q)
+                branch_pwr = C_tilde_S[:, idx0:idx0 + 3] @ trans_vec
+                M_P_q[:, i] = -np.imag(branch_pwr)
+                M_Q_q[:, i] = np.real(branch_pwr)
 
         return {
             "M_v_qinj": np.real(M_v_q),

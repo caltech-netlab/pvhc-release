@@ -1630,8 +1630,13 @@ class PVHCProblemWithoutBattery(ClarksonProblem):
 
         For each PV unit c at bus b with PV profile σ_c(ω):
             Δv̂_c = R̃[:, b] · σ_c(ω) · ζ̄_c   →  column of M_v
-            ΔP_c  = C̃_S[:, b] · σ_c(ω) · ζ̄_c  →  column of M_p
-            ΔQ_c  = 0 (unity power factor assumed for PV)  →  column of M_q
+            ΔP_c  = Re(C̃_S[:, b]) · σ_c(ω) · ζ̄_c  →  column of M_p
+            ΔQ_c  = Im(C̃_S[:, b]) · σ_c(ω) · ζ̄_c  →  column of M_q
+
+        PV runs at unity power factor, but C̃_S is complex: through a delta winding,
+        a phase's power reaches the other phases with complex weights, so real PV
+        power also drives per-phase reactive branch flows (they sum to zero over
+        the phases).
 
         For delta-connected PV, the injection is first converted to equivalent
         wye injection via the D2Y transformation (Appendix A).
@@ -1679,7 +1684,8 @@ class PVHCProblemWithoutBattery(ClarksonProblem):
         idx = (bus_idx - 1) * 3 + phase - 1
         M_v_pv[:, pv_idx] = np.real(1e-3 * R[:, idx])
         M_p_pv[:, pv_idx] = np.real(C_tilde_S[:, idx])
-    
+        M_q_pv[:, pv_idx] = np.imag(C_tilde_S[:, idx])
+
     def _add_delta_pv_impact(
         self, pv_idx, bus_idx, phases, conn_trans, R, X, C_tilde_S,
         M_v_pv, M_p_pv, M_q_pv
@@ -1694,8 +1700,9 @@ class PVHCProblemWithoutBattery(ClarksonProblem):
             1e-3 * R[:, idx:idx+3] @ np.real(transformation_vec) +
             1e-3 * X[:, idx:idx+3] @ np.imag(transformation_vec)
         )
-        M_p_pv[:, pv_idx] = np.real(C_tilde_S[:, idx:idx+3] @ np.real(transformation_vec))
-        M_q_pv[:, pv_idx] = np.real(C_tilde_S[:, idx:idx+3] @ np.imag(transformation_vec))
+        branch_pwr = C_tilde_S[:, idx:idx+3] @ transformation_vec
+        M_p_pv[:, pv_idx] = np.real(branch_pwr)
+        M_q_pv[:, pv_idx] = np.imag(branch_pwr)
     
     def _get_transformation_vector(self, conn_trans: Dict, phase_idx: int) -> np.ndarray:
         """Get delta-to-wye transformation vector."""
@@ -3298,7 +3305,8 @@ class PVHCProblemWithBattery(ClarksonProblem):
                 idx = (bus_idx - 1) * 3 + phases[0] - 1
                 M_v[:, i] = np.real(1e-3 * R[:, idx])
                 M_p[:, i] = np.real(C_tilde_S[:, idx])
-                # M_q[:, i] stays zero for grounded scalar injection
+                # Nonzero only below a delta winding (C_tilde_S is complex there)
+                M_q[:, i] = np.imag(C_tilde_S[:, idx])
             else:
                 phase_idx = ldf.STD_DELTA_ORDER.index(tuple(sorted(phases)))
                 trans_vec = self._get_transformation_vector(info.get("connected_transformer", {}), phase_idx)
@@ -3308,8 +3316,9 @@ class PVHCProblemWithBattery(ClarksonProblem):
                     1e-3 * R[:, idx0:idx0+3] @ np.real(trans_vec) +
                     1e-3 * X[:, idx0:idx0+3] @ np.imag(trans_vec)
                 )
-                M_p[:, i] = np.real(C_tilde_S[:, idx0:idx0+3] @ np.real(trans_vec))
-                M_q[:, i] = np.real(C_tilde_S[:, idx0:idx0+3] @ np.imag(trans_vec))
+                branch_pwr = C_tilde_S[:, idx0:idx0+3] @ trans_vec
+                M_p[:, i] = np.real(branch_pwr)
+                M_q[:, i] = np.imag(branch_pwr)
 
         return M_v, M_p, M_q
 
@@ -3349,15 +3358,17 @@ class PVHCProblemWithBattery(ClarksonProblem):
             bus_idx = node2idx[bus_name]
 
             if phases[1] == 0:
-                # grounded phase connection: no coupling
+                # grounded phase connection: no coupling at the bus
                 idx = (bus_idx - 1) * 3 + phases[0] - 1
                 # voltage: v = ... + R*p + X*q  (scaled)
                 M_v_p[:, i] = np.real(1e-3 * R[:, idx])
                 M_v_q[:, i] = np.real(1e-3 * X[:, idx])
-                # branch flows
+                # branch flows: P + jQ = C_tilde_S (p + j q). The cross terms are nonzero
+                # only below a delta winding, where C_tilde_S is complex.
                 M_P_p[:, i] = np.real(C_tilde_S[:, idx])
+                M_P_q[:, i] = -np.imag(C_tilde_S[:, idx])
+                M_Q_p[:, i] = np.imag(C_tilde_S[:, idx])
                 M_Q_q[:, i] = np.real(C_tilde_S[:, idx])
-                # cross terms remain zero
             else:
                 phase_idx = ldf.STD_DELTA_ORDER.index(tuple(sorted(phases)))
                 trans_vec = self._get_transformation_vector(info.get("connected_transformer", {}), phase_idx)
@@ -3378,11 +3389,12 @@ class PVHCProblemWithBattery(ClarksonProblem):
                 M_v_p[:, i] = 1e-3 * (R[:, idx0:idx0+3] @ p_from_p + X[:, idx0:idx0+3] @ q_from_p)
                 M_v_q[:, i] = 1e-3 * (R[:, idx0:idx0+3] @ p_from_q + X[:, idx0:idx0+3] @ q_from_q)
 
-                # Branch flows (P depends on p_wye, Q depends on q_wye)
-                M_P_p[:, i] = np.real(C_tilde_S[:, idx0:idx0+3] @ p_from_p)
-                M_P_q[:, i] = np.real(C_tilde_S[:, idx0:idx0+3] @ p_from_q)
-                M_Q_p[:, i] = np.real(C_tilde_S[:, idx0:idx0+3] @ q_from_p)
-                M_Q_q[:, i] = np.real(C_tilde_S[:, idx0:idx0+3] @ q_from_q)
+                # Branch flows: P + jQ = C_tilde_S s_wye = (C_tilde_S trans_vec) (p + j q)
+                branch_pwr = C_tilde_S[:, idx0:idx0+3] @ trans_vec
+                M_P_p[:, i] = np.real(branch_pwr)
+                M_P_q[:, i] = -np.imag(branch_pwr)
+                M_Q_p[:, i] = np.imag(branch_pwr)
+                M_Q_q[:, i] = np.real(branch_pwr)
 
         return {
             "M_v_p": np.real(M_v_p),
