@@ -132,7 +132,7 @@ temp/                      All generated outputs (gitignored): caches, results, 
 ```
 
 `src/three_phase_lindistflow/` is an unmodified copy (plus its `LICENSE`) of the package in
-[3-phase-lindistflow](https://github.com/caltech-netlab/3-phase-lindistflow) at commit `5045300`.
+[3-phase-lindistflow](https://github.com/caltech-netlab/3-phase-lindistflow) at commit `51232fb`.
 To update it, replace the directory with the upstream `src/three_phase_lindistflow/`, then delete
 `temp/cache/circuit_model/` and `temp/cache/limits/`: they hold the model matrices and the network
 limits relaxed with them, which would otherwise keep coming from the previous version.

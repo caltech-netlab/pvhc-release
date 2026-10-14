@@ -122,10 +122,13 @@ def validate_line_phase_structure(branch_data):
         logger.warning("Line %s has no declared phases. Check skipped.", branch_data)
         return 
     z_ij = convert_series_impedance_3x3(branch_data['series_impedance'])
+    # A phase is present when its self-impedance is non-zero, however small, as in
+    # branch_data_to_admittance_matrix: an absolute tolerance in ohms would depend on
+    # the feeder's scale and units.
     active_phases = tuple(
         idx + 1
         for idx in range(3)
-        if not np.allclose(z_ij[idx, idx], 0)
+        if z_ij[idx, idx] != 0
     )
     # Compare as sets: the declared phases keep the DSS node order (e.g. (3, 2) for
     # "Bus1=632.3.2" in the IEEE 13-node feeder), while z_ij is indexed by phase.
@@ -142,7 +145,7 @@ def to_single_phase_series_impedance(branch_data):
     z_ij = convert_series_impedance_3x3(branch_data['series_impedance'])
     phases = tuple(p for p in branch_data.get('phases', ()) if p in (1, 2, 3))
     if not phases:
-        phases = tuple(idx + 1 for idx in range(3) if not np.isclose(z_ij[idx, idx], 0))
+        phases = tuple(idx + 1 for idx in range(3) if z_ij[idx, idx] != 0)
     # For a three-phase branch component, take its positive-sequence component
     if len(phases) == 3:
         return complex((F.conj().T @ z_ij @ F)[1, 1])

@@ -165,7 +165,12 @@ def three_phase_lindistflow_real(C_0, Z, Z_H, C_inv, N, node_list, node_data, ve
         C_diag: np.ndarray, shape=(N*3, 9)
         R: np.ndarray, shape=(N*3, N*3)
         X: np.ndarray, shape=(N*3, N*3)
-        C_inv_real: np.ndarray, shape=(N*3, N*3)
+        C_inv_real: np.ndarray, shape=(N*3, N*3), complex. Maps the per-phase nodal
+            injections s = p + 1j*q to the per-phase sending-end branch powers S = P + 1j*Q,
+            row-ordered like edge_list. Unlike C_diag, R and X it is not real-valued: it has
+            an imaginary part below transformers that mix phases (e.g. delta-wye, wye-delta
+            and split-phase banks), so take P = Re(C) p - Im(C) q and Q = Im(C) p + Re(C) q,
+            never Re(C) alone.
     """
     if verbose:
         logger.debug("Converting to real-valued LinDistFlow model...")
@@ -195,12 +200,17 @@ def three_phase_lindistflow_real(C_0, Z, Z_H, C_inv, N, node_list, node_data, ve
     gamma_tilde_H = sp.linalg.block_diag(*tuple(gamma_H_list))
     R = np.real(Z @ gamma_tilde + Z_H @ gamma_tilde_H)
     X = np.imag(-Z @ gamma_tilde + Z_H @ gamma_tilde_H)
+    # Complex even though the voltage model above is real: across a delta-wye or wye-delta
+    # (30-degree) or a split-phase bank, real power on one phase reaches the branches upstream
+    # split over two phases, as active and reactive power.
     C_inv_real = C_inv[diag_indices] @ gamma_tilde
     
     return C_diag, R, X, C_inv_real
 
 
 def three_phase_lindistflow_real_wrapper(circuit_data, node_data=None, node_list=None, verbose=False):
+    """Return C_diag, R, X, C_inv_real, node_list, edge_list; see three_phase_lindistflow_real
+    (C_inv_real is complex)."""
     C_0, Z, Z_H, C_inv, node_list, edge_list = \
         three_phase_lindistflow(circuit_data, node_list=node_list, verbose=verbose)
     if node_data is None:

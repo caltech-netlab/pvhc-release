@@ -116,7 +116,7 @@ from .voltages import (
 )
 # Baseline models for comparison
 from .baselines import (
-    hxu_3pldf_YY_only,
+    gan_hxu_3pldf,
     single_phase_lindistflow,
 )
 # Three-phase LinDistFlow
@@ -227,7 +227,7 @@ __all__ = [
     "compute_nominal_voltages_from_turns_ratio",
     "compute_nominal_complex_voltages_from_turns_ratio",
     "compute_v0_ref",
-    "hxu_3pldf_YY_only",
+    "gan_hxu_3pldf",
     "single_phase_lindistflow",
     "three_phase_lindistflow",
     "three_phase_lindistflow_real",

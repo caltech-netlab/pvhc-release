@@ -755,16 +755,6 @@ class DataLoader:
             raise e
         graph_pruned = graph.subgraph(nodes_to_keep)
         circuit_data = [circuit_data[edge2index[e]] for e in graph_pruned.edges]
-        # three_phase_lindistflow counts a phase of a line as present only if its impedance is
-        # not ~0 (np.allclose(z, 0), i.e. above 1e-8 ohm), and rejects a line whose declared
-        # phases differ. Ckt5's fuses and elbows come out of this parser as lines of about 4e-11
-        # ohm, which that check reads as having no phase at all, so leave the phases of such lines
-        # undeclared: the check then skips them, and nothing else reads the phases of a line from here on.
-        for edge_data in circuit_data:
-            if edge_data['element_type'] == 'line' and edge_data.get('phases'):
-                z = edge_data['series_impedance']
-                if all(np.allclose(z[p-1, p-1], 0) for p in edge_data['phases'] if p != 0):
-                    edge_data['phases'] = ()
 
         # Plot circuit (restricted to nodes with known coordinates — some nodes in
         # the subtree, e.g. internal terminals of normally-open switches, may not
@@ -939,7 +929,7 @@ class DataLoader:
         resistance/reactance matrices (D_r, D_x) and the incidence-based
         matrices (C_inv from nodal injections to branch flows; C_coef_inv, c_0
         from branch voltage drops to nodal voltages) of the wye-wye reference
-        model `three_phase_lindistflow.hxu_3pldf_YY_only`.
+        model `three_phase_lindistflow.gan_hxu_3pldf`.
 
         That model uses a scalar per-branch turns ratio, which is exact for line
         segments and for 3-phase transformers with a uniform per-phase ratio
@@ -949,7 +939,7 @@ class DataLoader:
         feeder (see README).
         """
         assert self.network_data_dict, "Call get_circuit_model() first."
-        _, _, _, C_inv, _, _, C_coef_inv, D_r, D_x, c_0 = ldf.hxu_3pldf_YY_only(
+        _, _, _, C_inv, _, _, C_coef_inv, D_r, D_x, c_0 = ldf.gan_hxu_3pldf(
             self.circuit_data, node_list=self.network_data_dict["node_list"], return_additional=True
         )
         return C_inv, C_coef_inv, D_r, D_x, c_0

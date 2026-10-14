@@ -13,12 +13,14 @@ from .voltages import compute_nominal_voltages_from_turns_ratio
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "hxu_3pldf_YY_only",
+    "gan_hxu_3pldf",
     "single_phase_lindistflow",
 ]
 
-def hxu_3pldf_YY_only(circuit_data, node_list=None, return_additional=False):
+def gan_hxu_3pldf(circuit_data, node_list=None, return_additional=False):
     """
+    Baseline three-phase LinDistFlow of Gan et al.: exact for lines and wye-wye
+    transformers only; every other transformer is mapped to a wye-wye equivalent.
     For usage, p, q are defined as nodal injection (positive as into the node)
     returns:
         C_tilde_0: np.ndarray, shape=(N*3, 3)
