@@ -12,9 +12,8 @@ resistance):
 where:
   mu_k   = mu_+^(k) - mu_-^(k)  (voltage upper minus lower dual variables)
   xi_i   = resistance scaling factor for branch i
-  C, D_r^{ref} come from the 3-phase LinDistFlow model (Section II.A); see
-  `DataLoader.get_branch_sensitivity_matrices()` / `three_phase_lindistflow
-  .compute_branch_sensitivity_matrices()` for the scope of networks this is
+  C, D_r^{ref} come from the wye-wye reference LinDistFlow model; see
+  `DataLoader.get_branch_sensitivity_matrices()` for the scope of networks this is
   valid for (scalar per-branch turns ratio -- true for this example feeder).
 
 This mechanism only has something to upgrade when voltage is actually a
@@ -96,7 +95,7 @@ def compute_series_resistance_sensitivity(feeder_name, opt_subfolder):
     data_loader = DataLoader(feeder_name)
     simulator = Simulator(data_loader)
     network_data = data_loader.get_circuit_model(feeder_root=cfg["feeder_root"])
-    C_T_inv, D_r, _, _ = data_loader.get_branch_sensitivity_matrices()
+    C_inv, C_T_inv, D_r, _, _ = data_loader.get_branch_sensitivity_matrices()
 
     opt_results = load_optimization_results(feeder_name, sub_folder=opt_subfolder)
     print("Loaded optimization results for feeder:", feeder_name, "T, C, N:", opt_results["dual_var"].shape)
@@ -143,7 +142,8 @@ def compute_series_resistance_sensitivity(feeder_name, opt_subfolder):
     #   left  = mu . C^{-T}   shape (T, 3N)
     #   right = C^{-1} . p^T  shape (3N, T)
     #   for branch i: dL/dxi_i = 2*Tr(left[:,3i:3i+3] . D_r[3i:3i+3,:] . right)
-    C_inv = network_data["C_tilde_S"]
+    # C^{-1} is the wye-wye model's, like D_r (network_data["C_tilde_S"] is the 3-phase
+    # model's, which is complex below a delta winding)
     left = mu @ C_T_inv   # (T, 3N)
     right = C_inv @ p_inj_sparse.T  # (3N, T)
 

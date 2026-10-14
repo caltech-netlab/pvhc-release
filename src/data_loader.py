@@ -8,7 +8,7 @@ Key responsibilities:
   - `_dssParser()`: Compile the feeder's master .dss file; extract buses,
     lines, transformers, loads, and capacitors from OpenDSS via altdss.
   - `_format_circuit_data()`: Convert DSS objects to the `circuit_data` list
-    expected by `three_phase_lindistflow.py` (handles DY/YD transformer
+    expected by `three_phase_lindistflow` (handles DY/YD transformer
     winding lookups, open-delta split-phase, parallel edge consolidation).
   - `get_circuit_model()`: Compute and cache the 3-phase LinDistFlow matrices
     R̃, X̃, C̃_0, C̃_S for a given feeder root (paper Appendix A / Section II.A).
@@ -574,7 +574,12 @@ class DataLoader:
                 'phases': swt_obj['phases'],
                 'S_rating': None,
             }
-            edge_data['series_impedance'] = np.eye(3) * (swt_obj['R'] + 1j * swt_obj['X'])
+            # Impedance only on the switch's own phases, so that it matches 'phases'
+            # (three_phase_lindistflow rejects a line whose impedance has phases it does not declare).
+            edge_data['series_impedance'] = np.zeros((3, 3), dtype=complex)
+            for p in swt_obj['phases']:
+                if p == 0: continue
+                edge_data['series_impedance'][p-1, p-1] = swt_obj['R'] + 1j * swt_obj['X']
             circuit_data.append(edge_data)
 
         """Consolidate duplicate edges (parallel edges)"""
@@ -750,6 +755,16 @@ class DataLoader:
             raise e
         graph_pruned = graph.subgraph(nodes_to_keep)
         circuit_data = [circuit_data[edge2index[e]] for e in graph_pruned.edges]
+        # three_phase_lindistflow counts a phase of a line as present only if its impedance is
+        # not ~0 (np.allclose(z, 0), i.e. above 1e-8 ohm), and rejects a line whose declared
+        # phases differ. Ckt5's fuses and elbows come out of this parser as lines of about 4e-11
+        # ohm, which that check reads as having no phase at all, so leave the phases of such lines
+        # undeclared: the check then skips them, and nothing else reads the phases of a line from here on.
+        for edge_data in circuit_data:
+            if edge_data['element_type'] == 'line' and edge_data.get('phases'):
+                z = edge_data['series_impedance']
+                if all(np.allclose(z[p-1, p-1], 0) for p in edge_data['phases'] if p != 0):
+                    edge_data['phases'] = ()
 
         # Plot circuit (restricted to nodes with known coordinates — some nodes in
         # the subtree, e.g. internal terminals of normally-open switches, may not
@@ -918,16 +933,26 @@ class DataLoader:
 
     def get_branch_sensitivity_matrices(self):
         """
-        Return (C_coef_inv, D_r, D_x, c_0) for the Appendix B dual-variable
+        Return (C_inv, C_coef_inv, D_r, D_x, c_0) for the Appendix B dual-variable
         sensitivity analysis (`scripts/dual_analysis.py`), in the same node/edge
-        ordering as `get_circuit_model()`. See
-        `three_phase_lindistflow.compute_branch_sensitivity_matrices` for the
-        scope of networks this is valid for.
+        ordering as `get_circuit_model()`: the per-branch block-diagonal
+        resistance/reactance matrices (D_r, D_x) and the incidence-based
+        matrices (C_inv from nodal injections to branch flows; C_coef_inv, c_0
+        from branch voltage drops to nodal voltages) of the wye-wye reference
+        model `three_phase_lindistflow.hxu_3pldf_YY_only`.
+
+        That model uses a scalar per-branch turns ratio, which is exact for line
+        segments and for 3-phase transformers with a uniform per-phase ratio
+        (YY, DY, YD), but is not a valid representation for split-phase or
+        open-delta transformers with per-phase-differentiated ratios. Check that
+        your feeder has no such transformers before relying on this for a new
+        feeder (see README).
         """
         assert self.network_data_dict, "Call get_circuit_model() first."
-        return ldf.compute_branch_sensitivity_matrices(
-            self.circuit_data, self.network_data_dict["node_list"]
+        _, _, _, C_inv, _, _, C_coef_inv, D_r, D_x, c_0 = ldf.hxu_3pldf_YY_only(
+            self.circuit_data, node_list=self.network_data_dict["node_list"], return_additional=True
         )
+        return C_inv, C_coef_inv, D_r, D_x, c_0
     
     def compute_nominal_voltages_from_turns_ratio(self, node_list, root_node_voltage):
         """

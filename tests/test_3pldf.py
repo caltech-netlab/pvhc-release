@@ -3,7 +3,7 @@ file = pathlib.Path(__file__).resolve()
 sys.path.append(str(file.parents[1]) + '/src')
 
 """
-Tests for the 3-phase LinDistFlow model (three_phase_lindistflow.py).
+Tests for the 3-phase LinDistFlow model (the three_phase_lindistflow package).
 """
 import copy
 import inspect

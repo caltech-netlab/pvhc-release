@@ -119,7 +119,7 @@ every script then falls back to the uniform
 src/                       Core library
   constants.py                Feeder registry (FEEDERS dict) and shared defaults
   data_loader.py               OpenDSS parsing (via altdss) + timeseries loading
-  three_phase_lindistflow.py  3-phase LinDistFlow model (Eq. 1-6, Appendix A)
+  three_phase_lindistflow/    3-phase LinDistFlow model (Eq. 1-6, Appendix A), vendored (see below)
   simulator.py                Applies the LinDistFlow model to timeseries data
   analyzer.py                  RSP/LP formulation + Clarkson iterative solver
   utils.py                     Config dataclasses, result I/O, misc helpers
@@ -130,6 +130,12 @@ tests/                     pytest suite (see Testing below)
 data/example_feeder/       OpenDSS circuit + timeseries (see Example data above)
 temp/                      All generated outputs (gitignored): caches, results, plots
 ```
+
+`src/three_phase_lindistflow/` is an unmodified copy (plus its `LICENSE`) of the package in
+[3-phase-lindistflow](https://github.com/caltech-netlab/3-phase-lindistflow) at commit `5045300`.
+To update it, replace the directory with the upstream `src/three_phase_lindistflow/`, then delete
+`temp/cache/circuit_model/` and `temp/cache/limits/`: they hold the model matrices and the network
+limits relaxed with them, which would otherwise keep coming from the previous version.
 
 ## Quickstart
 
@@ -202,7 +208,7 @@ test collection — this is a benign first-chance exception raised inside
 real crash; the run completes normally afterward.
 
 - `test_3pldf.py` — regression + smoke tests for the core LinDistFlow model
-  (`src/three_phase_lindistflow.py`) against fixed reference circuits.
+  (`src/three_phase_lindistflow/`) against fixed reference circuits.
 - `test_data_loader.py` — end-to-end test of OpenDSS parsing, circuit-model
   construction, and simulation on the example feeder.
 - `test_analyzer.py` — direct coverage of the RSP LP solver
