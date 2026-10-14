@@ -753,7 +753,13 @@ class DataLoader:
         except Exception as e:
             print(f"[Error] Failed to find feeder root: {e}")
             raise e
-        graph_pruned = graph.subgraph(nodes_to_keep)
+        # Build the pruned graph in the parent graph's (OpenDSS) order. Iterating a subgraph view
+        # goes through a set of bus names when it keeps fewer than half of the nodes (Ckt5 keeps
+        # 1196 of 2997), and that order changes from one Python process to the next.
+        keep = set(nodes_to_keep)
+        graph_pruned = nx.DiGraph()
+        graph_pruned.add_nodes_from((n, graph.nodes[n]) for n in graph.nodes if n in keep)
+        graph_pruned.add_edges_from((u, v, graph.edges[u, v]) for u, v in graph.edges if u in keep and v in keep)
         circuit_data = [circuit_data[edge2index[e]] for e in graph_pruned.edges]
 
         # Plot circuit (restricted to nodes with known coordinates — some nodes in
@@ -939,9 +945,14 @@ class DataLoader:
         feeder (see README).
         """
         assert self.network_data_dict, "Call get_circuit_model() first."
-        _, _, _, C_inv, _, _, C_coef_inv, D_r, D_x, c_0 = ldf.gan_hxu_3pldf(
+        _, _, _, C_inv, _, edge_list, C_coef_inv, D_r, D_x, c_0 = ldf.gan_hxu_3pldf(
             self.circuit_data, node_list=self.network_data_dict["node_list"], return_additional=True
         )
+        if [tuple(e) for e in edge_list] != [tuple(e) for e in self.network_data_dict["edge_list"]]:
+            raise RuntimeError(
+                "The cached circuit model's edge order differs from this parse; delete "
+                "temp/cache/circuit_model/ (and temp/cache/limits/) and rebuild."
+            )
         return C_inv, C_coef_inv, D_r, D_x, c_0
     
     def compute_nominal_voltages_from_turns_ratio(self, node_list, root_node_voltage):
