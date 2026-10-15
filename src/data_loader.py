@@ -444,31 +444,32 @@ class DataLoader:
                 'element_type': 'line',
                 'phases': line['phases'],
             }
-            # The line R,X matrices now set correctly in _extract_lines()
-            line['RMatrix'] *= line['length'] / 5280
-            line['XMatrix'] *= line['length'] / 5280
-            if len(line['RMatrix']) == 9:
-                edge_data['series_impedance'] = line['RMatrix'].reshape(3,3) + 1j * line['XMatrix'].reshape(3,3)
-            elif len(line['RMatrix']) == 4:
+            # OpenDSS gives RMatrix/XMatrix in ohms per unit of the line's own length unit, the
+            # unit of line['length'], so their product is the series impedance in ohms.
+            R_line = np.asarray(line['RMatrix'], dtype=float) * line['length']
+            X_line = np.asarray(line['XMatrix'], dtype=float) * line['length']
+            if len(R_line) == 9:
+                edge_data['series_impedance'] = R_line.reshape(3,3) + 1j * X_line.reshape(3,3)
+            elif len(R_line) == 4:
                 assert len(line['phases']) == 2, (line['phases'], line['name'])
                 # For non-existent lines, make the self-impedance infinity (LARGE).
                 edge_data['series_impedance'] = np.ones((3, 3), dtype=complex) * (1 + 1j) * LARGE
-                R, X = line['RMatrix'].reshape(2,2), line['XMatrix'].reshape(2,2)
+                R, X = R_line.reshape(2,2), X_line.reshape(2,2)
                 p1, p2 = line['phases'][0] - 1, line['phases'][1] - 1
                 edge_data['series_impedance'][p1, p1] = R[0, 0] + 1j * X[0, 0]
                 edge_data['series_impedance'][p2, p2] = R[1, 1] + 1j * X[1, 1]
                 edge_data['series_impedance'][p1, p2] = R[0, 1] + 1j * X[0, 1]
                 edge_data['series_impedance'][p2, p1] = R[1, 0] + 1j * X[1, 0]
-            elif len(line['RMatrix']) == 1:
+            elif len(R_line) == 1:
                 # Extract scalar to avoid shape-(1,) array assignment to scalar index
-                Z = complex(line['RMatrix'][0] + 1j * line['XMatrix'][0])
+                Z = complex(R_line[0] + 1j * X_line[0])
                 # For non-existent lines, make the self-impedance infinity (LARGE).
                 edge_data['series_impedance'] = np.ones((3, 3), dtype=complex) * (1 + 1j) * LARGE
                 for p in line['phases']:
                     if p == 0: continue
                     edge_data['series_impedance'][p-1, p-1] = Z
             else:
-                raise ValueError(f"Unexpected RMatrix length: {len(line['RMatrix'])}")
+                raise ValueError(f"Unexpected RMatrix length: {len(R_line)}")
             if (edge_data['series_impedance'] == 0).all():
                 print(f"[Warning] Zero impedance detected in branch: {line['name']}.")
                 
