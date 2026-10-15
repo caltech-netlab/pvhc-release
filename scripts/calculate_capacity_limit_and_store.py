@@ -55,17 +55,9 @@ def calculate_and_store_capacity_limits(
             annual energy (nameplate producing ~as much as the site consumes). A
             multiplier > 1 models a policy that permits net PV export beyond
             net-metering parity (real NEM/interconnection programs vary in how much
-            oversizing they allow), and -- on this example feeder -- is what lets
-            the network's actual voltage/thermal limits become the binding
-            constraint for a substantial share of customers rather than nearly all
-            of them being capped by their own consumption. Tuned empirically on
-            this feeder/subtree: 1x leaves ~98% of customers consumption-capped
-            (the network limit is only ever visible for a couple of customers on
-            one branch); 3x shifts that to a ~40/60 consumption/network split,
-            which is representative of both binding mechanisms without either one
-            trivializing the other (raising it much further pushes almost every
-            site to the same network ceiling regardless of its own consumption,
-            which stops being an interesting economic constraint at all).
+            oversizing they allow). On this example feeder/subtree at 3x, the
+            network (its upper voltage limit) holds all but 5 of 553 customers
+            below their ceiling.
     """
     cfg = FEEDERS[feeder_name]
 

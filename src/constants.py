@@ -15,6 +15,9 @@ Global constants definition
 #   - v_root_nom: nominal line-to-neutral voltage at feeder_root, in kV.
 #   - v_root_multiplier: multiplier to convert the feeder-head voltage
 #     timeseries' native units to kV (e.g. 1e-3 if the source data is in V).
+#   - v_root_setpoint_pu (optional, default 1.0): only for a feeder without
+#     feeder-head voltage data, the regulated voltage at which
+#     `DataLoader.get_feeder_head_data` holds the synthetic feeder head.
 FEEDERS = {
     "ckt5": {
         "data_path": "data/example_feeder",
@@ -28,6 +31,9 @@ FEEDERS = {
         "feeder_root": "63664",
         "v_root_nom": 7.1996,   # kV, line-to-neutral (12.47 kV line-line / sqrt(3))
         "v_root_multiplier": 1.0,
+        # A typical substation LTC setpoint. At a 1.0 pu feeder head the subtree's own
+        # load takes its lowest bus voltage below 0.95 pu (OpenDSS: 0.943 pu at nominal load).
+        "v_root_setpoint_pu": 1.03,
     },
 }
 DEFAULT_FEEDER_NAME = "ckt5"

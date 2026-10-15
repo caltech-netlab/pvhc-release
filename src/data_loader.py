@@ -1044,7 +1044,7 @@ class DataLoader:
         df.rename(columns={t_column: 't'}, inplace=True)
         return df
 
-    def get_feeder_head_data(self, t0, t1, v_root_nom, voltage_noise_pu=0.01, seed=0):
+    def get_feeder_head_data(self, t0, t1, v_root_nom, voltage_noise_pu=0.005, regulator_band_pu=0.01, seed=0):
         """
         Build a feeder-head MW/MVAR/voltage timeseries from the circuit's own
         annual load shapes, in place of real feeder-head SCADA/AMI telemetry.
@@ -1055,12 +1055,16 @@ class DataLoader:
         to give an aggregate active/reactive power timeseries with the same
         real diurnal/seasonal structure the load shapes encode. There is no
         real historical feeder-head voltage measurement to substitute for, so
-        the source voltage is held at its nominal value with small (seeded,
-        clearly synthetic) noise to avoid a perfectly flat voltage series.
+        the source voltage is held at a regulated setpoint (FEEDERS'
+        `v_root_setpoint_pu`, default 1.0) with small (seeded, clearly synthetic)
+        noise kept within the regulator's band, to avoid a perfectly flat
+        voltage series.
 
         Args:
             t0, t1: Start/end of the period to return, as parseable date strings.
             v_root_nom: Nominal line-to-neutral voltage at the feeder root (kV).
+            voltage_noise_pu: Standard deviation of the voltage noise (per unit).
+            regulator_band_pu: The noise is clipped to +/- this (per unit).
         Returns:
             DataFrame with columns t, MW, MVAR, VA, VB, VC — the same schema
             consumed by get_scenario_data_by_range().
@@ -1095,14 +1099,16 @@ class DataLoader:
             q_total += q_by_shape[shape] * mult
 
         rng = np.random.default_rng(seed)
-        noise = 1.0 + rng.normal(0, voltage_noise_pu, size=n_pts)
+        setpoint = FEEDERS[self.feeder_name].get("v_root_setpoint_pu", 1.0)
+        noise = 1.0 + np.clip(rng.normal(0, voltage_noise_pu, size=n_pts), -regulator_band_pu, regulator_band_pu)
+        v_head = v_root_nom * setpoint * noise
         df = pd.DataFrame({
             't': t,
             'MW': p_total * 1e-3,
             'MVAR': q_total * 1e-3,
-            'VA': v_root_nom * noise,
-            'VB': v_root_nom * noise,
-            'VC': v_root_nom * noise,
+            'VA': v_head,
+            'VB': v_head,
+            'VC': v_head,
         })
         t0_dt, t1_dt = pd.to_datetime(t0), pd.to_datetime(t1)
         mask = (df['t'] >= t0_dt) & (df['t'] <= t1_dt)

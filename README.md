@@ -58,10 +58,14 @@ customer billing/telemetry data, which cannot be released. In its place,
 - **Solar timeseries**: `solar_capacity_factor.csv`, an hourly solar capacity
   factor series from NREL's public NSRDB for a public lat/lon grid cell (not
   tied to any specific customer or premise).
-- **Feeder-head voltage**: held at nominal with small seeded Gaussian noise
+- **Feeder-head voltage**: held at a regulated 1.03 pu (a typical substation
+  LTC setpoint; `v_root_setpoint_pu` in `src/constants.py`) with small seeded
+  Gaussian noise kept within the regulator's +-1% band
   (`DataLoader.get_feeder_head_data`), since no historical feeder-head voltage
   telemetry is available for this substitute feeder — this is the one
   synthetic element in the example data and is documented as such in the code.
+  At a 1.0 pu feeder head, the subtree's own load would take its lowest bus
+  voltages below 0.95 pu.
 
 Branch thermal ratings and voltage limits come directly from Ckt5's own
 OpenDSS data (`Line.NormAmps` times bus base kV; a symmetric +-5% voltage
@@ -96,17 +100,12 @@ a program lets customers oversize (real NEM/interconnection rules vary). On
 this feeder that yields ceilings of roughly 0.04-107 kW (mean ~31 kW) instead
 of a flat 10 kW.
 
-The multiplier matters here because a uniform ceiling is not very revealing on
-this particular subtree: at a flat 10 kW the network is barely binding and
-549 of 553 customers simply receive the full ceiling (99.5% of the theoretical
-maximum), so the resulting distribution is nearly constant. Raising the
-ceiling lets the network's own voltage/thermal limits become the binding
-constraint for a substantial share of customers -- at 3x, about 40% of
-customers end up consumption-capped and 60% genuinely network-capped, which is
-what actually exercises the network model. (For reference, the paper's feeder
-is considerably more constrained: under its uniform 10 kW ceiling it awards
-only 43% of the theoretical maximum, so there the flat ceiling already
-produces the bimodal distribution reported in Fig. 4.)
+On this subtree the network binds under either ceiling (its upper voltage
+limit). At a flat 10 kW, 124 of 553 customers receive the full ceiling and the
+total, 4.10 MW, is 74% of the theoretical maximum; at 3x only 5 customers reach
+their ceiling and the total, 4.24 MW, is 25% of it. (For reference, the
+paper's feeder awards 43% of the theoretical maximum under its uniform 10 kW
+ceiling, the bimodal distribution reported in Fig. 4.)
 
 To reproduce the paper's exact ceiling convention instead, set
 `USE_EXTRACTED_CAPACITY_LIMITS = False` in `scripts/run_pvhc_estimation.py`;
@@ -147,10 +146,8 @@ writes to `temp/` and prints its own progress; nothing needs to be downloaded.
 #    constraints) from each customer's estimated annual consumption, scaled by
 #    capacity_multiplier (default 3x "net-zero"). This is an extension, not
 #    the paper's own convention -- the paper sets zeta_max uniformly at 10 kW
-#    for simplicity. Recommended here: skipping this makes every downstream
-#    script fall back to that flat 10 kW ceiling, under which this particular
-#    subtree is barely network-constrained and the resulting PV distribution
-#    looks artificially uniform. See "Per-customer capacity ceilings" above.
+#    for simplicity. Skipping this makes every downstream script fall back to
+#    that flat 10 kW ceiling. See "Per-customer capacity ceilings" above.
 python scripts/calculate_capacity_limit_and_store.py
 
 # 2. PVHC estimation via the robust-scenario program (Algorithm 1, Table I).
@@ -256,16 +253,13 @@ includes the slack/root bus.
   `src/analyzer.py`): interior-point solvers leave small non-zero duals on every
   inactive constraint, which an absolute threshold used to count at random.
 - Appendix B's dual-sensitivity ranking in `dual_analysis.py` is derived for
-  *voltage*-driven resistance sensitivity (dPVHC/d(resistance scale)). On a
-  feeder where thermal/branch-flow is the actual binding mechanism (the
-  default on this subtree -- voltage never approaches its band even at 100%
-  uncoordinated adoption, see `compute_series_resistance_sensitivity`'s
-  docstring), that quantity is identically zero everywhere, so
+  *voltage*-driven resistance sensitivity (dPVHC/d(resistance scale)), the
+  mechanism that binds on this subtree. On a feeder where thermal/branch-flow
+  binds instead, that quantity is identically zero everywhere, so
   `compute_thermal_rating_sensitivity` computes the analogous quantity for
-  thermal rating instead (dPVHC/d(S_rating), a direct sum of each branch's own
-  LP shadow prices -- no impedance-sensitivity matrices needed, since a
-  branch's own rating is the direct RHS of its own flow constraints). The
-  `__main__` block auto-detects which mechanism actually binds and upgrades
-  branches accordingly (reconductoring for lower resistance, or a higher
-  thermal rating); on a feeder where voltage does bind, this falls back to the
-  original resistance-based ranking unchanged.
+  thermal rating (dPVHC/d(S_rating), a direct sum of each branch's own LP
+  shadow prices -- no impedance-sensitivity matrices needed, since a branch's
+  own rating is the direct RHS of its own flow constraints). The `__main__`
+  block auto-detects which mechanism actually binds and upgrades branches
+  accordingly (reconductoring for lower resistance, or a higher thermal
+  rating).

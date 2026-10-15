@@ -17,11 +17,12 @@ where:
   valid for (scalar per-branch turns ratio -- true for this example feeder).
 
 This mechanism only has something to upgrade when voltage is actually a
-binding constraint somewhere in the scenario set. On a *thermal*-bound network
-(no scenario's voltage constraint ever binds, e.g. this example feeder/subtree)
-dL/dxi_i is identically zero for every branch -- reconductoring for lower
-resistance genuinely would not increase PVHC, so ranking upgrades by it is
-meaningless there. `compute_thermal_rating_sensitivity` below computes the
+binding constraint somewhere in the scenario set (as on this example
+feeder/subtree). On a *thermal*-bound network (no scenario's voltage
+constraint ever binds) dL/dxi_i is identically zero for every branch --
+reconductoring for lower resistance genuinely would not increase PVHC, so
+ranking upgrades by it is meaningless there.
+`compute_thermal_rating_sensitivity` below computes the
 analogous quantity for the mechanism that binds instead: a branch's own
 thermal rating S_i appears directly as the RHS of its own flow constraints
 (types 2-9), so by standard LP sensitivity theory the marginal PVHC gain per
@@ -89,7 +90,8 @@ def compute_series_resistance_sensitivity(feeder_name, opt_subfolder):
 
     A high dL/dxi_i means reducing branch i's resistance (e.g., reconductoring)
     yields the largest marginal PVHC gain -- used to rank upgrades in Table V.
-    Positive semi-definiteness of the sensitivity follows from convexity.
+    A negative value means reducing the resistance would lower PVHC, to first
+    order (e.g. where lower voltage limits, mu_-, bind).
     """
     cfg = FEEDERS[feeder_name]
     data_loader = DataLoader(feeder_name)
@@ -154,7 +156,11 @@ def compute_series_resistance_sensitivity(feeder_name, opt_subfolder):
         temp   = D_r_i @ right           # (3, T)
         dLdxi[i] = 2 * np.sum(left_i * temp.T)
 
-    assert (dLdxi > -1e-6).all(), "Sensitivity should be non-negative for all lines"
+    # Relative tolerance: round-off in the products above leaves values of about 1e-8 x the largest.
+    negative = dLdxi < -1e-6 * np.max(np.abs(dLdxi))
+    if negative.any():
+        print(f"Note: {negative.sum()} branch(es) have negative sensitivity (e.g. binding lower voltage "
+              f"limits); they are not upgrade candidates.")
 
     """Printing and visualization"""
     k = 10  # Number of top branches to upgrade
@@ -343,10 +349,10 @@ if __name__ == "__main__":
 
     # Auto-detect which mechanism actually binds on this feeder: if voltage
     # sensitivity is uniformly ~0 (no scenario's voltage constraint ever
-    # binds -- true by default on this example feeder/subtree), reconductoring
-    # for lower resistance genuinely wouldn't increase PVHC, so rank/upgrade
-    # by thermal rating instead. On a feeder where voltage does bind, this
-    # falls back to the original Appendix B resistance-based ranking unchanged.
+    # binds), reconductoring for lower resistance genuinely wouldn't increase
+    # PVHC, so rank/upgrade by thermal rating instead. Where voltage binds (as
+    # on this example feeder/subtree), this is the original Appendix B
+    # resistance-based ranking unchanged.
     if np.max(dLdxi_voltage) < 1e-9:
         print("\n[Info] Voltage sensitivity is uniformly zero on this feeder "
               "(thermal/branch-flow is the binding mechanism) -- using "

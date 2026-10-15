@@ -232,8 +232,8 @@ class PVHCProblemWithoutBattery(ClarksonProblem):
     # Class constants
     # Symmetric +-VOL_TOL voltage band (e.g. ANSI C84.1 Range A is +-5%) --
     # matches the upper bound; no evidence a wider lower-side allowance is
-    # needed (tested empirically: the real feeder's base-case voltage never
-    # approaches even the symmetric band, let alone a wider one).
+    # needed (on the example feeder, with its regulated feeder-head voltage, no
+    # sampled base case violates even the symmetric band).
     DEFAULT_LOWER_VOLTAGE_RATIO = 1.0
     DEFAULT_RELAXATION_FACTOR = 1.5
     DEFAULT_FAIRNESS_FACTOR = 100
