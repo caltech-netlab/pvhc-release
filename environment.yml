@@ -18,6 +18,7 @@ dependencies:
   - pip
   - pip:
     - cvxpy       # bundles the open-source HiGHS (LP) and Clarabel (conic) solvers used by default
+    - clarabel<0.11  # 0.11.1 stops with InsufficientProgress on fairness subproblems that 0.10 solves
     - ecos
     - altdss      # OpenDSS bindings (dss-extensions.org)
     - gurobipy    # optional: only used if a script is explicitly told to (solver=cp.GUROBI);

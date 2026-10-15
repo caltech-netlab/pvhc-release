@@ -245,7 +245,9 @@ includes the slack/root bus.
   ECOS, then MOSEK if it is installed. Clarabel is pinned to its QDLDL linear
   solver: from Clarabel 0.11 the default picks the faer solver for these dense
   subproblems, which can fail or panic. (GUROBI is not in the list: CVXPY's
-  GUROBI interface does not take exponential cones.)
+  GUROBI interface does not take exponential cones.) `environment.yml` pins
+  `clarabel<0.11`: on some of these subproblems Clarabel 0.11.1 stops with
+  InsufficientProgress whatever its settings, where 0.10 solves them.
 - A run that cannot be certified stops with an error rather than reporting a
   result: `run_iterative_pvhc_analysis` raises if the Clarkson solver does not
   converge (default `clarkson_max_iterations=30`), and `fairness_sweep.py` leaves
