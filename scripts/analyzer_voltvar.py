@@ -66,7 +66,8 @@ import cvxpy as cp
 from src.data_loader import DataLoader  # noqa: F401  (see note above)
 from src.constants import *
 from src.simulator import Simulator
-from src.analyzer import ClarksonProblem
+from src.analyzer import ClarksonProblem, support_from_duals
+from src.solver_utils import solve_with_fallback
 
 import three_phase_lindistflow as ldf
 
@@ -419,10 +420,12 @@ class PVHCProblemWithVoltVar(ClarksonProblem):
             constraints.extend(self._build_scenario_constraints_cvxpy(zeta_u, zeta_cbar, q_vv, t))
 
         problem = cp.Problem(objective, constraints)
-        problem.solve(solver=solver, verbose=verbose)
+        solve_with_fallback(problem, solver, verbose,
+                            label=f"Volt-VAR subproblem ({len(scenario_indices)} scenarios)")
 
         if problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-            return None, float("-inf"), set()
+            print(f"  [WARN] Subproblem status={problem.status}.")
+            return None, float("-inf"), None
 
         support = self._extract_support_from_duals(constraints, scenario_indices)
         sol = self._pack_solution(zeta_u, zeta_cbar, q_vv)
@@ -514,32 +517,70 @@ class PVHCProblemWithVoltVar(ClarksonProblem):
         return constraints
 
     def _extract_support_from_duals(self, constraints: List, scenario_indices: List[int]) -> Set[int]:
-        support = set()
+        """Support scenarios from the duals of their constraints (see `support_from_duals`)."""
         num_non_scenario = int(self.num_utility_pv > 0) + int(self.num_customer_pv > 0)
         if self.num_utility_pv > 0:
             num_non_scenario += 2  # global schedule-box upper/lower (always present)
         per_scenario = self.NUM_NETWORK_CONSTRAINT_TYPES + (
             self.NUM_INVERTER_CONSTRAINT_TYPES if self.num_utility_pv > 0 else 0
         )
-
+        squared = self._squared_constraint_matrices()
+        blocks = {}
         for i, scenario_idx in enumerate(scenario_indices):
             start = num_non_scenario + i * per_scenario
-            end = start + per_scenario
-            is_support = False
-            for j in range(start, min(end, len(constraints))):
-                try:
-                    dual_val = constraints[j].dual_value
-                    if dual_val is not None and np.any(np.abs(dual_val) > 1e-6):
-                        is_support = True
-                        break
-                except (AttributeError, TypeError):
-                    continue
-            if is_support:
-                support.add(scenario_idx)
+            blocks[scenario_idx] = list(zip(constraints[start:start + per_scenario],
+                                            self._scenario_row_norms(scenario_idx, squared)))
+        support = support_from_duals(blocks)
+        # No duals at all: keep every active scenario
+        return set(scenario_indices) if support is None else support
 
-        if len(support) == 0:
-            support = set(scenario_indices)
-        return support
+    def _squared_constraint_matrices(self) -> List[Tuple[Optional[np.ndarray], Optional[np.ndarray], np.ndarray]]:
+        """
+        For the 10 network constraint types, in the order of `_build_scenario_constraints_cvxpy`:
+        the squared utility and (robust) customer coefficient matrices, and the row sums of
+        the squared q_vv coefficients (which do not depend on the scenario).
+        """
+        M, Mq, St = self.matrices, self.matrices_qinj, self._static
+        types = [
+            (M["M_v_utility"], St["M_v_customer_pos"], St["M_v_customer_neg"], Mq["M_v_qinj"]),
+            (M["M_p_utility"], St["M_p_customer_pos"], St["M_p_customer_neg"], Mq["M_P_qinj"]),
+            (M["M_q_utility"], St["M_q_customer_pos"], St["M_q_customer_neg"], Mq["M_Q_qinj"]),
+            (St["M_pq_utility"], St["M_pq_customer_pos"], St["M_pq_customer_neg"], St["M_pq_qinj"]),
+            (St["M_pmq_utility"], St["M_pmq_customer_pos"], St["M_pmq_customer_neg"], St["M_pmq_qinj"]),
+        ]
+        n_u, n_c = self.num_utility_pv, self.num_customer_pv
+        squared = []
+        for M_u, M_c_pos, M_c_neg, M_qinj in types:
+            q_sq = (np.asarray(M_qinj) ** 2).sum(axis=1) if (n_u > 0 and M_qinj.size > 0) else 0.0
+            for M_c in (M_c_pos, M_c_neg):
+                squared.append((np.asarray(M_u) ** 2 if n_u > 0 else None,
+                                np.asarray(M_c) ** 2 if n_c > 0 else None, q_sq))
+        return squared
+
+    def _scenario_row_norms(self, t: int, squared) -> List[np.ndarray]:
+        """
+        Norms of the coefficient rows (w.r.t. zeta_u, zeta_cbar and q_vv) of scenario t's
+        network and inverter constraints, in the order of `_build_scenario_constraints_cvxpy`.
+        """
+        n_u, n_c = self.num_utility_pv, self.num_customer_pv
+        pv_t = np.asarray(self.pv_profiles_processed[t], dtype=float)
+        pv_u, pv_c = pv_t[:n_u], pv_t[n_u:n_u + n_c]
+        norms = []
+        for M_u_sq, M_c_sq, q_sq in squared:
+            total = q_sq
+            if M_u_sq is not None:
+                total = total + M_u_sq @ pv_u ** 2
+            if M_c_sq is not None:
+                total = total + M_c_sq @ pv_c ** 2
+            norms.append(np.sqrt(total))
+        if n_u > 0:
+            # util_scaled (pv*zeta_u) and q_vv_t against s_rated = factor*zeta_u, per site
+            f, r2 = self.inverter_rating_factor, np.sqrt(2.0)
+            norms += [np.abs(pv_u - f), np.abs(pv_u + f),
+                      np.full(n_u, np.sqrt(1 + f ** 2)), np.full(n_u, np.sqrt(1 + f ** 2)),
+                      np.sqrt((pv_u - r2 * f) ** 2 + 1), np.sqrt((pv_u + r2 * f) ** 2 + 1),
+                      np.sqrt((pv_u - r2 * f) ** 2 + 1), np.sqrt((pv_u + r2 * f) ** 2 + 1)]
+        return norms
 
     # --------------------------------------------------------------------------
     # Violation checking (numpy, vectorized per scenario)

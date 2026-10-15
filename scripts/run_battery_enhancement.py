@@ -428,10 +428,10 @@ def run_pvhc_with_battery(
     print("\n" + "=" * 80)
     print("OPTIMIZATION RESULTS (WITH BATTERY)")
     print("=" * 80)
-    print(f"Converged: {results.get('converged')}")
+    print(f"Converged: {results.get('converged')} ({results.get('termination_reason')})")
     print(f"Iterations: {results.get('num_iterations')}")
     print(f"Final active count: {results.get('final_count')}")
-    print(f"Support count: {len(results.get('support_indices', []))}")
+    print(f"Support count: {len(results.get('support_indices') or [])}")
     print(f"Wall time: {wall_s:.2f} s")
 
     if x is None:

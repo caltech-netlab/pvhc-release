@@ -35,6 +35,7 @@ from src.data_loader import DataLoader
 from src.simulator import Simulator
 from src.analyzer import PVHCProblemWithoutBattery, clarkson_solver
 from src.utils import update_num_scenarios, load_capacity_limits
+from src.solver_utils import FAIRNESS_SOLVERS, solve_with_fallback
 
 # ---------------------------------------------------------------------------
 # Sweep configuration
@@ -44,12 +45,10 @@ SEED = 42
 # Number of scenarios to sample; paper used 1404 (final Clarkson iteration).
 # Reduce to 200-300 for faster runs; increase for tighter risk guarantees.
 NUM_SCENARIOS = 200
-# Solvers for the log-fairness (exponential-cone) objective, tried in order --
-# CLARABEL/ECOS can occasionally fail on this problem's harder instances now
-# that real (non-inflated) network limits make some scenarios numerically
-# tight. GUROBI/MOSEK are listed last as an optional, licensed fallback --
-# harmless to list even if not installed (fails immediately, moves on).
-SOLVERS = [cp.CLARABEL, cp.ECOS, cp.GUROBI, cp.MOSEK]
+# Solvers for the log-fairness (exponential-cone) objective, tried in order on each
+# subproblem, falling back on any failure (see src/solver_utils.py): CLARABEL, then
+# ECOS, then MOSEK if installed.
+SOLVERS = FAIRNESS_SOLVERS
 SOLAR_PROFILE_PATH = "data/example_feeder/solar_capacity_factor.csv"
 
 # Gamma ablation values
@@ -140,13 +139,11 @@ def solve_one(
         objective = cp.Maximize(cp.sum(x_var) + fairness_term)
 
     prob = cp.Problem(objective, constraints_fixed)
-    for solver_idx, solver_choice in enumerate(SOLVERS):
-        try:
-            prob.solve(solver=solver_choice, verbose=False)
-            break
-        except cp.error.SolverError as e:
-            print(f"  [WARN] {solver_choice} failed ({e}); "
-                  f"{'trying next solver...' if solver_idx + 1 < len(SOLVERS) else 'no solvers left.'}")
+    try:
+        solve_with_fallback(prob, SOLVERS, label=f"gamma={gamma}, eta={eta:.0e}")
+    except cp.error.SolverError as e:
+        print(f"  [WARN] {e}")
+        return np.nan, np.nan, None
 
     if prob.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
         print(f"  [WARN] solver status={prob.status} for gamma={gamma}, eta={eta:.0e}")
@@ -196,6 +193,9 @@ def plot_tradeoff_frontier(gamma_vals, pvhc_row, fairness_row, eta_label, out_pa
     """
     # Drop NaN entries
     mask = ~(np.isnan(pvhc_row) | np.isnan(fairness_row))
+    if not mask.any():
+        print("  [WARN] No gamma produced a result; skipping the trade-off plot.")
+        return
     g_valid = [gamma_vals[i] for i in range(len(gamma_vals)) if mask[i]]
     pvhc_v = pvhc_row[mask]
     fair_v = fairness_row[mask]
@@ -362,15 +362,28 @@ def main():
             # Clarkson solver
             print("  Running Clarkson ...", end=" ", flush=True)
             t0 = time.time()
-            clarkson_result = clarkson_solver(
-                problem=problem,
-                is_scenario_based=True,
-                initial_sample_size=25,
-                max_iterations=10,
-                solver=SOLVERS,
-                verbose=False,
-                seed=current_seed,
-            )
+            try:
+                clarkson_result = clarkson_solver(
+                    problem=problem,
+                    is_scenario_based=True,
+                    initial_sample_size=25,
+                    max_iterations=30,
+                    solver=SOLVERS,
+                    verbose=False,
+                    seed=current_seed,
+                )
+            except cp.error.SolverError as e:
+                print(f"\n  [WARN] {e}\n  Leaving gamma={_gamma_tick_label(gamma)} out of the results.",
+                      flush=True)
+                final_result = None
+                break
+            if not clarkson_result["converged"]:
+                # An unconverged solution violates sampled scenarios and has no valid
+                # support count, so it can neither be reported nor certified.
+                print(f"\n  [WARN] Clarkson did not converge ({clarkson_result['termination_reason']}); "
+                      f"leaving gamma={_gamma_tick_label(gamma)} out of the results.", flush=True)
+                final_result = None
+                break
             k = len(clarkson_result["support_indices"])
             dt = time.time() - t0
             print(
@@ -378,8 +391,6 @@ def main():
                 f"  ({dt:.1f}s)",
                 flush=True,
             )
-            if not clarkson_result["converged"]:
-                print("  [WARN] Clarkson did not converge", flush=True)
 
             # Wait-and-judge criterion (Theorem III.2)
             new_N = update_num_scenarios(
@@ -406,12 +417,14 @@ def main():
                 N_samples = new_N
                 outer_iter += 1
 
+        if final_result is None and outer_iter < MAX_OUTER_ITER:
+            continue  # Clarkson failed for this gamma (reported above); it stays NaN
         if final_result is None:
             print(
                 f"  [WARN] Did not converge within {MAX_OUTER_ITER} outer iterations",
                 flush=True,
             )
-            final_result = clarkson_result  # use last result anyway
+            final_result = clarkson_result  # use last result anyway (N* is reported as '?')
 
         # Extract PVHC and Jain from optimal capacities
         opt_caps = final_result["optimal_capacities"]

@@ -34,6 +34,7 @@ from src.data_loader import DataLoader
 from src.constants import FEEDERS, DEFAULT_FEEDER_NAME, DEFAULT_CANDIDATE_PV_CAPACITY_KW
 from src.simulator import Simulator
 from src.analyzer import PVHCProblemWithoutBattery, clarkson_solver
+from src.solver_utils import FAIRNESS_SOLVERS
 from src.utils import (
     store_optimization_results,
     load_optimization_results,
@@ -258,7 +259,7 @@ def run_iterative_pvhc_analysis(
             problem=problem,
             is_scenario_based=True,
             initial_sample_size=config.initial_sample_size,
-            max_iterations=10,
+            max_iterations=config.clarkson_max_iterations,
             maximum_subproblem_size=config.maximum_subproblem_size,
             solver=config.solver,
             verbose=verbose,
@@ -268,6 +269,17 @@ def run_iterative_pvhc_analysis(
         solve_time = time.time() - solve_start_time
         total_optimization_time += solve_time
 
+        if not results_isa["converged"]:
+            # An unconverged solution is not optimal for the sampled scenarios (it violates
+            # some of them), and its support count is not the program's, so the
+            # epsilon-beta check below would certify the wrong thing.
+            raise RuntimeError(
+                f"Clarkson did not converge in outer iteration {outer_iter + 1} "
+                f"({results_isa['termination_reason']}; "
+                f"{len(results_isa['violated_scenarios'])} sampled scenario(s) still violated). "
+                f"Increase clarkson_max_iterations or maximum_subproblem_size and rerun."
+            )
+
         num_active_constraints = len(results_isa["support_indices"])
         optimal_capacities = results_isa["optimal_capacities"]
 
@@ -276,10 +288,6 @@ def run_iterative_pvhc_analysis(
         print(f"   - Total PV Capacity: {results_isa['total_capacity']:.2f} kW")
         print(f"   - Number of support constraints: {num_active_constraints}")
         print(f"   - Solve time: {solve_time:.2f} seconds")
-
-        if not results_isa["converged"]:
-            print(f"   Warning: Clarkson solver did not converge!")
-            print(f"   Violated scenarios: {len(results_isa['violated_scenarios'])}")
 
         new_N_samples = update_num_scenarios(
             epsilon=epsilon,
@@ -545,15 +553,10 @@ if __name__ == "__main__":
             sub_folder=subfolder,
             with_fairness=fairness,
             # HiGHS (LP-only) is fast but can't handle the log-fairness objective
-            # (Eq. 16, an exponential-cone problem). CLARABEL and ECOS both can,
-            # but either can occasionally fail on this problem's harder instances
-            # once real (non-inflated) network limits make some scenarios
-            # numerically tight; clarkson_solver tries each in order and falls
-            # back to the next on a SolverError. GUROBI/MOSEK are listed last as
-            # an optional, licensed fallback -- harmless to list even if not
-            # installed (that just fails immediately and moves on), and only
-            # actually used if the open-source solvers above it couldn't solve.
-            solver=[cp.CLARABEL, cp.ECOS, cp.GUROBI, cp.MOSEK] if fairness else cp.HIGHS,
+            # (Eq. 16, an exponential-cone problem). FAIRNESS_SOLVERS tries CLARABEL,
+            # ECOS, then MOSEK if installed on each subproblem, falling back on any
+            # failure (src/solver_utils.py).
+            solver=FAIRNESS_SOLVERS if fairness else cp.HIGHS,
             utility_pv_ratio=utility_ratio,
             use_capacity_limits=USE_EXTRACTED_CAPACITY_LIMITS,
             load_cached_limits=True,

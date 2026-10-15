@@ -46,7 +46,73 @@ import os
 
 from .simulator import Simulator
 from .constants import *
+from .solver_utils import solve_with_fallback
 import three_phase_lindistflow as ldf
+
+
+# A scenario is a support scenario (Definition III.1) when the duals of its constraints are not
+# zero. Interior-point solvers (Clarabel, MOSEK) leave every inactive constraint a small residual
+# dual (about 1e-7 to 1e-6 here), so "not zero" has to be judged against the duals that are.
+# Each scenario is scored by its largest |dual| times the norm of that constraint's row, which
+# puts voltage (kW/kV^2) and flow (kW/kW) constraints on one scale and cancels the fairness
+# weight. It is support if one of its constraints is active (slack within SUPPORT_SLACK_RTOL of
+# the constraint's size) and its score is at least SUPPORT_DUAL_RTOL times the largest score of
+# such scenarios.
+SUPPORT_DUAL_RTOL = 1e-6
+SUPPORT_SLACK_RTOL = 1e-4
+
+
+def support_from_duals(blocks: Dict[int, List[Tuple[Any, np.ndarray]]],
+                       rtol: float = SUPPORT_DUAL_RTOL,
+                       slack_rtol: float = SUPPORT_SLACK_RTOL) -> Optional[Set[int]]:
+    """
+    Support scenarios from the duals of their constraints (see SUPPORT_DUAL_RTOL).
+
+    Args:
+        blocks: {scenario index: [(CVXPY inequality, norms of its coefficient rows), ...]}
+            for every scenario in the subproblem, after it has been solved.
+
+    Returns:
+        The support scenarios (possibly none, e.g. when every site sits at its capacity
+        limit), or None if the solver returned no duals at all.
+    """
+    scores, slacks = {}, {}
+    for scenario, items in blocks.items():
+        best, min_slack, has_duals = 0.0, np.inf, False
+        for constraint, row_norms in items:
+            dual = constraint.dual_value
+            if dual is None:
+                continue
+            has_duals = True
+            best = max(best, float(np.max(np.abs(dual) * row_norms)))
+            lhs, rhs = constraint.args
+            size = np.maximum(np.maximum(np.abs(lhs.value), np.abs(rhs.value)), 1e-9)
+            min_slack = min(min_slack, float(np.min(-np.asarray(constraint.expr.value) / size)))
+        if has_duals:
+            scores[scenario], slacks[scenario] = best, min_slack
+    if not scores:
+        return None
+    # Duals are judged against those of scenarios with an active constraint: the duals of
+    # inactive constraints are residuals (complementary slackness).
+    active = [s for s in scores if slacks[s] <= slack_rtol]
+    top = max((scores[s] for s in active), default=0.0)
+    if top == 0:
+        return set()  # no active scenario constraint carries a dual, e.g. every site at its cap
+    threshold = rtol * top
+    support = {s for s in active if scores[s] >= threshold}
+    # Say so when the call is close: an active scenario just below the threshold, or a
+    # non-negligible dual on a constraint that is not active (an inaccurate solution).
+    below = [scores[s] for s in active if s not in support and scores[s] > 0]
+    if support and below and min(scores[s] for s in support) < 1e3 * max(below):
+        print(f"  [support] {len(support)} support scenario(s) with dual scores down to "
+              f"{min(scores[s] for s in support):.2e}, but an active non-support one scores "
+              f"{max(below):.2e} (threshold {threshold:.2e}): the support count may be unreliable.")
+    inactive = [s for s in scores if s not in active and scores[s] >= threshold]
+    if inactive:
+        print(f"  [support] {len(inactive)} scenario(s) have non-negligible duals but no active "
+              f"constraint (smallest relative slack {min(slacks[s] for s in inactive):.1e}); "
+              f"not counted as support. The solution may be inaccurate.")
+    return support
 
 
 
@@ -800,12 +866,13 @@ class PVHCProblemWithoutBattery(ClarksonProblem):
         
         # Solve
         problem = cp.Problem(objective, constraints)
-        problem.solve(solver=solver, verbose=verbose)
-        
+        solve_with_fallback(problem, solver, verbose,
+                            label=f"RSP subproblem ({len(scenario_indices)} scenarios)")
+
         if problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
             print(f"  [WARN] Subproblem status={problem.status} (infeasible/unbounded) "
                   f"for {len(scenario_indices)} active scenario(s).")
-            return None, float('-inf'), set(), None, None
+            return None, float('-inf'), None, None, None
 
         # Extract support indices via dual variables
         support_indices = self._extract_support_from_duals(constraints, scenario_indices)
@@ -981,34 +1048,50 @@ class PVHCProblemWithoutBattery(ClarksonProblem):
         constraints: List,
         scenario_indices: List[int]
     ) -> Set[int]:
-        """Extract support scenarios from dual variables."""
-        support = set()
-        
+        """Extract support scenarios from dual variables (see `support_from_duals`)."""
         # First constraint is capacity bound, skip it
         num_non_scenario = 1
-        
+        squared = self._squared_constraint_matrices()
+        blocks = {}
         for i, scenario_idx in enumerate(scenario_indices):
             start_idx = num_non_scenario + i * self.NUM_CONSTRAINT_TYPES
-            end_idx = start_idx + self.NUM_CONSTRAINT_TYPES
-            
-            is_support = False
-            for j in range(start_idx, min(end_idx, len(constraints))):
-                try:
-                    dual_val = constraints[j].dual_value
-                    if dual_val is not None and np.any(np.abs(dual_val) > 1e-6):
-                        is_support = True
-                        break
-                except (AttributeError, TypeError):
-                    continue
-            
-            if is_support:
-                support.add(scenario_idx)
-        
-        # If no support found, include all active
-        if len(support) == 0:
-            support = set(scenario_indices)
-        
-        return support
+            row_norms = self._scenario_row_norms(scenario_idx, squared)
+            blocks[scenario_idx] = list(zip(
+                constraints[start_idx:start_idx + self.NUM_CONSTRAINT_TYPES], row_norms))
+        support = support_from_duals(blocks)
+        # No duals at all: keep every active scenario
+        return set(scenario_indices) if support is None else support
+
+    def _squared_constraint_matrices(self) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """
+        Squared coefficient matrices of the 10 scenario constraint types, in the order of
+        `_build_scenario_constraints_cvxpy`: (utility, customer) per type, the customer one
+        with the robust sign selection of `_compute_robust_lhs_cvxpy`.
+        """
+        M = self.matrices
+        pairs = [
+            (M['M_v_utility'], M['M_v_customer']),
+            (M['M_p_utility'], M['M_p_customer']),
+            (M['M_q_utility'], M['M_q_customer']),
+            (M['M_p_utility'] + M['M_q_utility'], M['M_p_customer'] + M['M_q_customer']),
+            (M['M_p_utility'] - M['M_q_utility'], M['M_p_customer'] - M['M_q_customer']),
+        ]
+        squared = []
+        for M_util, M_cust in pairs:
+            for use_max in (True, False):
+                if self.is_robust:
+                    M_cust_robust = np.maximum(M_cust, 0) if use_max else np.minimum(M_cust, 0)
+                else:
+                    M_cust_robust = M_cust
+                squared.append((np.asarray(M_util) ** 2, np.asarray(M_cust_robust) ** 2))
+        return squared
+
+    def _scenario_row_norms(self, t: int, squared: List[Tuple[np.ndarray, np.ndarray]]) -> List[np.ndarray]:
+        """Norms of the coefficient rows (w.r.t. x) of scenario t's 10 constraint types."""
+        pv_t = np.asarray(self.pv_profiles_processed[t], dtype=float)
+        pv_util_sq = pv_t[:self.num_utility_pv] ** 2
+        pv_cust_sq = pv_t[self.num_utility_pv:] ** 2
+        return [np.sqrt(M_util_sq @ pv_util_sq + M_cust_sq @ pv_cust_sq) for M_util_sq, M_cust_sq in squared]
     
     # --------------------------------------------------------------------------
     # Constraint-based solving (for large-scale problems)
@@ -1033,10 +1116,11 @@ class PVHCProblemWithoutBattery(ClarksonProblem):
             objective = self._create_objective(x)
             constraints = [x <= self.capacity_limits]
             problem = cp.Problem(objective, constraints)
-            problem.solve(solver=solver, verbose=verbose)
-            
+            solve_with_fallback(problem, solver, verbose, label="RSP subproblem (no constraints)")
+
             if problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-                return None, float('-inf'), set()
+                print(f"  [WARN] Subproblem status={problem.status}.")
+                return None, float('-inf'), None
             return x.value, problem.value, set()
         
         # Stack matrices
@@ -1064,11 +1148,13 @@ class PVHCProblemWithoutBattery(ClarksonProblem):
         
         # Solve
         problem = cp.Problem(objective, constraints)
-        problem.solve(solver=solver, verbose=verbose)
-        
+        solve_with_fallback(problem, solver, verbose,
+                            label=f"RSP subproblem ({len(constraint_indices)} constraints)")
+
         if problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-            return None, float('-inf'), set()
-        
+            print(f"  [WARN] Subproblem status={problem.status}.")
+            return None, float('-inf'), None
+
         # Find support by direct evaluation (check which constraints are active)
         support_indices = self._find_active_constraints(
             x.value, constraint_indices, tolerance=1e-6
@@ -2131,10 +2217,12 @@ class PVHCProblemWithBattery(ClarksonProblem):
             constraints.extend(self._build_scenario_constraints_cvxpy(zeta_u, zeta_cbar, zeta_b, p_b, q_b, t))
 
         problem = cp.Problem(objective, constraints)
-        problem.solve(solver=solver, verbose=verbose)
+        solve_with_fallback(problem, solver, verbose,
+                            label=f"battery subproblem ({len(scenario_indices)} scenarios)")
 
         if problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-            return None, float("-inf"), set()
+            print(f"  [WARN] Subproblem status={problem.status}.")
+            return None, float("-inf"), None
 
         # Pack solution for violation checking
         sol = self._pack_solution(zeta_u, zeta_cbar, zeta_b, p_b, q_b, soc)
@@ -2359,10 +2447,12 @@ class PVHCProblemWithBattery(ClarksonProblem):
 
         objective = cp.Maximize(self._objective_from_x(x))
         prob = cp.Problem(objective, constraints)
-        prob.solve(solver=solver, verbose=verbose)
+        solve_with_fallback(prob, solver, verbose,
+                            label=f"battery subproblem ({len(constraint_indices)} constraints)")
 
         if prob.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-            return None, float("-inf"), set()
+            print(f"  [WARN] Subproblem status={prob.status}.")
+            return None, float("-inf"), None
 
         sol = np.array(x.value).reshape(-1)
         support = self._find_active_constraints(sol, constraint_indices, tolerance=1e-6)
@@ -3014,6 +3104,18 @@ class PVHCProblemWithBattery(ClarksonProblem):
                False, self.matrices_batt["M_Q_p"], self.matrices_batt["M_Q_q"], -self.limits["S_ratings"], False):
             return True
 
+        # linearized apparent power, P+Q and P-Q (constraint types 6-9)
+        for sign in (1, -1):
+            base = self.base_case["active_power"][t] + sign * self.base_case["reactive_power"][t]
+            M_u = self.matrices_pv["M_p_utility"] + sign * self.matrices_pv["M_q_utility"]
+            M_c = self.matrices_pv["M_p_customer"] + sign * self.matrices_pv["M_q_customer"]
+            M_bp = self.matrices_batt["M_P_p"] + sign * self.matrices_batt["M_Q_p"]
+            M_bq = self.matrices_batt["M_P_q"] + sign * self.matrices_batt["M_Q_q"]
+            if lhs(base, M_u, M_c, True, M_bp, M_bq, self.limits["sqrt2_S_ratings"], True):
+                return True
+            if lhs(base, M_u, M_c, False, M_bp, M_bq, -self.limits["sqrt2_S_ratings"], False):
+                return True
+
         return False
 
     # --------------------------------------------------------------------------
@@ -3528,7 +3630,8 @@ def clarkson_solver(
     solver: Optional[Any] = cp.HIGHS,
     verbose: bool = True,
     seed: int = 42,
-    solve_all: bool = False
+    solve_all: bool = False,
+    max_subproblem_growth: float = 2.0,
 ) -> Dict[str, Any]:
     """
     Iterative scenario/constraint addition solver — implements step 2 of Algorithm 1.
@@ -3541,41 +3644,46 @@ def clarkson_solver(
       5. Add violated scenarios to the active set; repeat until no new violations.
 
     The returned `support_indices` are the support scenarios (Definition III.1)
-    identified via non-zero dual variables (constraints [0..9] per scenario).
-    The caller (`run_iterative_pvhc_analysis`) passes |support_indices| to
-    `update_num_scenarios` (utils.py) to check the φ_{ℓ,n,β}(1-ε) ≥ 0 criterion
-    (Theorem III.2 / Algorithm 1 step 3).
+    identified via non-zero dual variables (constraints [0..9] per scenario; see
+    `support_from_duals`). The caller (`run_iterative_pvhc_analysis`) passes
+    |support_indices| to `update_num_scenarios` (utils.py) to check the
+    φ_{ℓ,n,β}(1-ε) ≥ 0 criterion (Theorem III.2 / Algorithm 1 step 3). That is only
+    valid for a converged result: callers must check 'converged'.
 
     Args:
         is_scenario_based: If True, one subproblem constraint per scenario;
                            if False, individual constraint rows (more granular).
         initial_sample_size: |S_0|, initial active scenario count.
         max_iterations: Cap on Clarkson iterations within one outer call.
-        maximum_subproblem_size: Unused cap (kept for API compatibility).
-        solver: CVXPY solver (default HIGHS; use CLARABEL or a licensed conic
-            solver if the problem has a fairness/log-barrier term), or a list
-            of solvers to try in order -- each subproblem solve falls back to
-            the next one on a SolverError, since the log-fairness objective's
-            exponential-cone reformulation can occasionally be numerically
-            hard for a given open-source solver at this problem's scale (see
-            README "Known limitations").
+        maximum_subproblem_size: Cap on the active set once violated scenarios have to be
+            sampled. When the support alone fills it, the active set grows past it (the
+            support plus up to half the cap of violated scenarios) instead of stopping,
+            up to `max_subproblem_growth` times the cap.
+        solver: CVXPY solver, (solver, options) tuple, or a list of them tried in order on
+            each subproblem, falling back on any failure (`solver_utils.solve_with_fallback`).
+            The default HIGHS cannot handle the fairness/log-barrier term; use
+            `solver_utils.FAIRNESS_SOLVERS` for it.
         verbose: Print iteration progress.
         seed: Random seed for reproducibility.
         solve_all: Skip iterative approach; solve full LP with all scenarios.
+        max_subproblem_growth: See maximum_subproblem_size.
 
     Returns:
         dict with keys: 'optimal_capacities', 'total_capacity', 'support_indices',
-                        'violated_scenarios', 'converged', 'dual_var'.
+                        'violated_scenarios', 'converged', 'termination_reason'
+                        ('converged', 'max_iterations', 'subproblem_failed' or
+                        'subproblem_too_large'), 'dual_var', 'scenario_indices'.
+        'dual_var' and 'scenario_indices' come from the same subproblem as the capacities.
     """
     np.random.seed(seed)
-    solvers = list(solver) if isinstance(solver, (list, tuple)) else [solver]
-    
+
     # Total number of elements (scenarios or constraints)
     if is_scenario_based:
         N = problem.num_scenarios
     else:
         N = problem.num_scenarios * problem.num_constraints_per_scenario
-    
+    largest_subproblem = int(max_subproblem_growth * maximum_subproblem_size)
+
     if verbose:
         print(f"\n{'='*70}")
         print(f"Clarkson Iterative {'Scenario' if is_scenario_based else 'Constraint'} Addition")
@@ -3584,102 +3692,105 @@ def clarkson_solver(
         print(f"Initial sample size: {initial_sample_size}")
         print(f"Max iterations: {max_iterations}")
         print(f"{'='*70}\n")
-    
+
     # Initialize
     iteration = 0
     weights = np.ones(N)
     k_current = min(initial_sample_size, N) if not solve_all else N
-    
+
     # Sample initial set
     active_indices = np.random.choice(
         N, size=k_current, replace=False, p=(weights / np.sum(weights))
     ) if not solve_all else np.arange(N)
     active_indices = set(active_indices.tolist())
-    
+
     # Main loop
     x_optimal = None
-    support_indices: Set[int] = set()
+    obj_val = None
+    support_indices: Optional[Set[int]] = None
+    dual_var, scenario_indices = None, None
     converged = False
+    termination_reason = None
     violated_indices: Set[int] = set()
-    
+
     while iteration <= max_iterations:
         if verbose:
             print(f"\nIteration {iteration}:")
             print(f"  Active {'scenarios' if is_scenario_based else 'constraints'}: {len(active_indices)}")
-        
-        # Solve subproblem, falling back through `solvers` on a SolverError
+
         active_list = sorted(list(active_indices))
-        results = None
-        for solver_idx, solver_choice in enumerate(solvers):
-            try:
-                results = problem.solve_subproblem(
-                    active_list, is_scenario_based, solver_choice, verbose=False
-                )
-                break
-            except cp.error.SolverError as e:
-                if verbose:
-                    print(f"  [WARN] {solver_choice} failed ({e}); "
-                          f"{'trying next solver...' if solver_idx + 1 < len(solvers) else 'no solvers left.'}")
-        if results is None:
-            raise cp.error.SolverError(
-                f"All solver(s) {solvers} failed on this subproblem."
-            )
-        dual_var, scenario_indices = None, None
+        results = problem.solve_subproblem(active_list, is_scenario_based, solver, verbose=False)
         if len(results) == 3:
-            x_optimal, obj_val, support_indices = results
+            x_new, obj_new, support_new = results
+            dual_new, scenarios_new = None, None
         elif len(results) == 5:
-            x_optimal, obj_val, support_indices, dual_var, scenario_indices = results
+            x_new, obj_new, support_new, dual_new, scenarios_new = results
         else:
             raise ValueError("Unexpected number of return values from solve_subproblem")
-        
-        if x_optimal is None:
-            if verbose:
-                print("  Warning: Optimization failed or infeasible.")
+
+        if x_new is None:
+            termination_reason = 'subproblem_failed'
+            print(f"  [clarkson] The subproblem with {len(active_list)} active "
+                  f"{'scenarios' if is_scenario_based else 'constraints'} has no solution; "
+                  f"stopping without convergence.")
+            # Then the sampled program has no solution either: return none, not the previous one
+            x_optimal = obj_val = support_indices = dual_var = scenario_indices = None
             break
-        
+        x_optimal, obj_val, support_indices = x_new, obj_new, set(support_new)
+        dual_var, scenario_indices = dual_new, scenarios_new
+
         if verbose:
             print(f"  Optimal value: {obj_val:.2f}")
             print(f"  Support size: {len(support_indices)}")
-        
+
         # Find violations
         violated_indices = problem.find_violated_indices(
             x_optimal, tolerance=1e-6, is_scenario_based=is_scenario_based,
             exclude_indices=active_indices
         )
-        
+
         # Update weights
         for idx in violated_indices:
             weights[idx] *= 2.0
-        
+
         if verbose:
             print(f"  Violated: {len(violated_indices)}")
-        
+
         # Termination check
         if len(violated_indices) == 0:
             converged = True
+            termination_reason = 'converged'
             if verbose:
                 print(f"\n{'='*70}")
                 print(f"Converged! No violations found.")
                 print(f"{'='*70}")
             break
-        
+
         # Update active set
         if len(active_indices) + len(violated_indices) > maximum_subproblem_size:
             num_to_sample = maximum_subproblem_size - len(support_indices)
             if num_to_sample <= 0:
+                # The support alone fills the cap. Stopping here would return a solution
+                # that violates sampled scenarios, so grow the subproblem instead.
+                num_to_sample = min(max(1, maximum_subproblem_size // 2), len(violated_indices),
+                                    largest_subproblem - len(support_indices))
+                if num_to_sample <= 0:
+                    termination_reason = 'subproblem_too_large'
+                    print(f"  [clarkson] {len(support_indices)} support scenarios: growing the subproblem "
+                          f"past {largest_subproblem} (max_subproblem_growth x maximum_subproblem_size) "
+                          f"would be needed; stopping without convergence.")
+                    break
                 if verbose:
-                    print(f"  Warning: Support size {len(support_indices)} exceeds max subproblem size.")
-                break
+                    print(f"  Support size {len(support_indices)} fills the subproblem cap "
+                          f"{maximum_subproblem_size}; growing the subproblem.")
 
             num_to_sample = min(num_to_sample, len(violated_indices))
-            
+
             violated_list = sorted(list(violated_indices))
             sampled_violated = np.random.choice(
-                violated_list, size=num_to_sample, replace=True,
+                violated_list, size=num_to_sample, replace=False,
                 p=(weights[violated_list] / np.sum(weights[violated_list]))
             )
-
-            violated_indices = set(sampled_violated.tolist())
 
             # Alternatively, sample from all the indices not in support indices:
             # non_support_indices = sorted(list(set(range(N)) - support_indices))
@@ -3689,22 +3800,20 @@ def clarkson_solver(
             #     p=(weights[non_support_indices] / np.sum(weights[non_support_indices]))
             # )
 
-            # violated_indices = set(sampled_non_support.tolist())
-        
-            active_indices = support_indices.union(violated_indices)
+            active_indices = support_indices.union(sampled_violated.tolist())
         else:
             active_indices = active_indices.union(violated_indices)
         iteration += 1
-        
+
         if solve_all:
             break
-    
-    if iteration > max_iterations and not converged:
-        if verbose:
-            print(f"\n{'='*70}")
-            print(f"Warning: Maximum iterations ({max_iterations}) reached.")
-            print(f"{'='*70}")
-    
+
+    if not converged and termination_reason is None:
+        termination_reason = 'max_iterations'
+        print(f"  [clarkson] Maximum iterations ({max_iterations}) reached with "
+              f"{len(violated_indices)} violated {'scenarios' if is_scenario_based else 'constraints'}; "
+              f"not converged.")
+
     return {
         'optimal_solution': x_optimal,
         'optimal_capacities': x_optimal,  # Alias for compatibility
@@ -3713,10 +3822,11 @@ def clarkson_solver(
         'num_iterations': iteration,
         'final_count': len(active_indices),
         'final_scenario_count': len(active_indices),  # Alias
-        'support_indices': sorted(list(support_indices)),
+        'support_indices': sorted(list(support_indices)) if support_indices is not None else None,
         'converged': converged,
+        'termination_reason': termination_reason,
         'violated_indices': sorted(list(violated_indices)) if not converged else [],
         'violated_scenarios': sorted(list(violated_indices)) if not converged else [],  # Alias
-        'dual_var': dual_var, 
+        'dual_var': dual_var,
         'scenario_indices': scenario_indices
     }

@@ -235,16 +235,24 @@ includes the slack/root bus.
 ## Known limitations
 
 - The log-fairness (Eq. 16) exponential-cone objective can be numerically hard
-  for open-source conic solvers on this feeder's harder, tightly-constrained
-  instances now that the network's real (non-inflated) limits make some
-  instances genuinely tight. `clarkson_solver` accepts a list of solvers and
-  falls back through them in order on a `SolverError`; `run_pvhc_estimation.py`
-  and `fairness_sweep.py` both pass `[cp.CLARABEL, cp.ECOS, cp.GUROBI, cp.MOSEK]`
-  for the fairness case -- listing GUROBI/MOSEK is harmless even if you don't
-  have them installed (that combination just fails immediately and the chain
-  moves on). In practice CLARABEL/ECOS solve most instances; a small number of
-  scenario draws need a licensed solver to fully resolve. This is a solver
-  robustness issue, not a modeling bug.
+  for open-source conic solvers. `clarkson_solver` accepts a list of solvers
+  (optionally with options) and tries them in order on each subproblem
+  (`src/solver_utils.py`), falling back on any failure: an exception, a Rust
+  panic inside Clarabel, or a status without a usable solution. Every failed
+  attempt is printed, and if all fail the run stops with an error.
+  `run_pvhc_estimation.py` and `fairness_sweep.py` use `FAIRNESS_SOLVERS`:
+  Clarabel, then Clarabel with a shorter step and without equilibration, then
+  ECOS, then MOSEK if it is installed. Clarabel is pinned to its QDLDL linear
+  solver: from Clarabel 0.11 the default picks the faer solver for these dense
+  subproblems, which can fail or panic. (GUROBI is not in the list: CVXPY's
+  GUROBI interface does not take exponential cones.)
+- A run that cannot be certified stops with an error rather than reporting a
+  result: `run_iterative_pvhc_analysis` raises if the Clarkson solver does not
+  converge (default `clarkson_max_iterations=30`), and `fairness_sweep.py` leaves
+  such a gamma out. Support scenarios are counted from duals scaled by their
+  constraint rows, relative to the largest one (`support_from_duals` in
+  `src/analyzer.py`): interior-point solvers leave small non-zero duals on every
+  inactive constraint, which an absolute threshold used to count at random.
 - Appendix B's dual-sensitivity ranking in `dual_analysis.py` is derived for
   *voltage*-driven resistance sensitivity (dPVHC/d(resistance scale)). On a
   feeder where thermal/branch-flow is the actual binding mechanism (the

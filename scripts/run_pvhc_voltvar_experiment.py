@@ -347,6 +347,7 @@ def run_baseline(
         seed=seed,
         solve_all=False,
     )
+    _require_converged(results, "baseline")
 
     x = results.get("optimal_solution")
     n_u = len(utility_pv_info)
@@ -362,6 +363,16 @@ def run_baseline(
         "utility_capacities": util_cap,
         "customer_capacities": cust_cap,
     }
+
+
+def _require_converged(results: dict, what: str) -> None:
+    # An unconverged Clarkson solution violates some of the scenarios, so it is not a hosting
+    # capacity, and comparing it with the other run would be meaningless.
+    if not results.get("converged"):
+        raise RuntimeError(
+            f"Clarkson did not converge for the {what} problem ({results.get('termination_reason')}); "
+            f"increase max_iterations or maximum_subproblem_size and rerun."
+        )
 
 
 def run_voltvar(
@@ -409,6 +420,7 @@ def run_voltvar(
         seed=seed,
         solve_all=False,
     )
+    _require_converged(results, "Volt-VAR")
 
     x = results.get("optimal_solution")
     if x is None:

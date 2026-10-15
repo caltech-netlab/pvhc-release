@@ -53,14 +53,13 @@ class PVHCTestConfig:
     solver: Any = cp.HIGHS  # Default solver: HiGHS is open-source, needs no license, and is
                              # fast for the plain (many-constraint) LP. It cannot handle the
                              # log-fairness objective (Eq. 16, an exponential-cone problem) --
-                             # callers must pass a conic solver (e.g. cp.CLARABEL, open-source)
-                             # whenever with_fairness=True. Can also be a list of solvers, tried
-                             # in order with fallback on SolverError (clarkson_solver supports
-                             # this directly) -- useful since the fairness objective's conic
-                             # reformulation can occasionally be numerically hard for a given
-                             # open-source solver at this problem's scale.
+                             # callers must pass a conic solver whenever with_fairness=True,
+                             # e.g. src.solver_utils.FAIRNESS_SOLVERS. Can also be a list of
+                             # solvers or (solver, options) pairs, tried in order on each
+                             # subproblem with fallback on any failure (solver_utils.solve_with_fallback).
     initial_sample_size: int = 50  # Default initial sample size for iterative scenario addition
     maximum_subproblem_size: int = 10  # Default maximum subproblem size for iterative scenario addition
+    clarkson_max_iterations: int = 30  # Clarkson iterations per outer iteration; an unconverged run raises
     sub_folder: str = None  # Optional subfolder for storing results
     with_fairness: bool = False  # Whether to include fairness in the optimization
     batt_size_kwh: float = 0.0  # Battery size in kWh, default 0.0 (no battery)

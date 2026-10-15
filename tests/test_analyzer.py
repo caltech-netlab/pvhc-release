@@ -7,6 +7,7 @@ import cvxpy as cp
 from src.data_loader import DataLoader
 from src.simulator import Simulator
 from src.analyzer import PVHCProblemWithoutBattery, clarkson_solver
+from src.solver_utils import FAIRNESS_SOLVERS
 from src.constants import FEEDERS, DEFAULT_FEEDER_NAME
 
 SOLAR_PROFILE_PATH = "data/example_feeder/solar_capacity_factor.csv"
@@ -68,25 +69,15 @@ def test_clarkson_solution_respects_capacity_and_is_feasible():
 def test_fairness_objective_solves_with_clarabel():
     """
     The log-barrier fairness objective (Eq. 16) is an exponential-cone problem
-    that HiGHS cannot handle. CLARABEL is the documented open-source default
-    for it, but can occasionally fail on this problem's harder (tightly-
-    constrained) instances -- see README "Known limitations". Try the open-
-    source solvers first, then fall back to a licensed one if installed and
-    available, so this test doesn't require a commercial license to exist,
-    but still passes wherever one happens to be present.
+    that HiGHS cannot handle. FAIRNESS_SOLVERS tries Clarabel (QDLDL), Clarabel
+    with other settings, ECOS, then MOSEK if installed, on each subproblem --
+    see README "Known limitations". Every failed attempt is printed, and the
+    test fails (SolverError) only if all of them fail on some subproblem.
     """
     problem = _build_problem(with_fairness=True)
-    result = None
-    for solver in (cp.CLARABEL, cp.ECOS, cp.GUROBI, cp.MOSEK):
-        try:
-            result = clarkson_solver(
-                problem, initial_sample_size=10, max_iterations=5, solver=solver, verbose=False
-            )
-            break
-        except Exception:
-            continue
-    if result is None:
-        raise AssertionError("No available solver could solve the fairness objective")
+    result = clarkson_solver(
+        problem, initial_sample_size=10, max_iterations=5, solver=FAIRNESS_SOLVERS, verbose=False
+    )
 
     assert result["converged"], "Clarkson solver should converge with the fairness objective"
     x = result["optimal_capacities"]
